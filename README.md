@@ -60,17 +60,91 @@ Result on the retail ROM: **zero unresolved control transfers.**
 
 ## Status
 
-Decoder and control-flow analysis are done and self-checking. The C emitter is
-next.
+The ROM compiles to C and the C runs. What is missing is the hardware around
+it: the LCD, the timers that drive the clock, and the buttons.
 
 | Stage | State |
 |---|---|
 | **E0C6200 decoder** — all 4096 opcodes | ✅ complete, validated |
 | **Control-flow analysis** — NPC propagation, reachability | ✅ complete, 0 unresolved |
 | **JPBA jump-table resolution** — classify and resolve all target pages | ✅ complete |
-| **C emitter** — ROM → native C | 🔨 next |
-| **E0C6S46 runtime** — LCD, timers, buzzer, buttons, interrupts | ⬜ not started |
+| **C emitter** — ROM → native C | ✅ complete, runs 64M cycles clean |
+| **E0C6S46 runtime** — LCD, timers, buzzer, buttons, interrupts | 🔨 next |
 | **Host frontend** — render the 32×16 dot matrix + icons | ⬜ not started |
+
+### The recompiled output
+
+```
+$ python tools/emit.py tama.b generated/tama_rom.c
+generated/tama_rom.c: 41631 lines from 6144 ROM words
+
+$ clang -std=c11 -O2 -Wall -Wextra -Iinclude ...
+$ ./smoke
+ok: 64000324 cycles, pc=0x00F0, sp=0xF3, a=0 b=9 x=1B0 y=100,
+    0 halt-resumes, 8 display nibbles set, no traps
+```
+
+64 million cycles in under a second — roughly **2,000× the real hardware's
+32,768 Hz** — with no traps, and eight nibbles of display RAM written, meaning
+the boot path got as far as the LCD driver rather than spinning in place.
+
+It builds clean under `-Wall -Wextra` at `-O2`.
+
+### What the generated C looks like
+
+Sequential instructions fall through with no branch at all. Direct jumps are
+`goto`. This is `PSET`/`JPBA`/`CALL` around address `0x0546`:
+
+```c
+L_0546: /* A80  ADD A, A */
+    t->cycles += 7;
+    r = t->a + t->a;
+    t->cf = r > 15;
+    if (t->df && r > 9) { r += 6; t->cf = 1; }
+    t->zf = (r & 0xF) == 0;
+    t->a = r & 0xF;
+    CHECK_BUDGET(0x0547);
+L_0548: /* E47  PSET 0x07 */
+    t->cycles += 5;
+    t->if_delay = 1;                    /* the page it loads is compile-time */
+L_0549: /* FE8  JPBA */
+    t->cycles += 5;
+    t->pc = 0x0700 | (t->b << 4) | t->a;
+    goto dispatch;
+L_054B: /* 407  CALL 0x07 */
+    t->cycles += 7;
+    MW((t->sp - 1) & 0xFF, (0x054C >> 8) & 0xF);
+    MW((t->sp - 2) & 0xFF, (0x054C >> 4) & 0xF);
+    t->sp = (t->sp - 3) & 0xFF;
+    MW(t->sp, 0x054C & 0xF);
+    goto L_0307;                        /* PSET 0x03 + CALL 0x07, resolved */
+```
+
+`PSET` leaves nothing behind but its one-instruction interrupt hold-off — all
+162 of them stop being control flow and become compile-time facts. That is the
+payoff from the NPC analysis.
+
+### Soundness, and the one bug that mattered
+
+Only two things reach the dispatch switch: `RET`/`RETS`/`RETD`, whose return
+address is popped out of RAM, and `JPBA`. The switch covers **every one of the
+6144 words**, so a computed transfer can never land somewhere without code. The
+jump-table analysis is not load-bearing here — it explains what the tables are,
+but the emitter would be correct without it.
+
+`CALL`/`RET` are *not* mapped onto the C call stack. The three return-address
+nibbles are pushed into RAM at `SP` exactly as the hardware does, because the
+program is free to read or rewrite them and proving otherwise would need a
+stack-discipline argument this ROM does not offer.
+
+The first build trapped at `pc=0x1CB9` — an address outside a 6144-word ROM —
+after 6767 cycles. `RET` takes the bank bit from the *live* PC, but recompiled
+code has no live PC between dispatch points, so it was reading a stale value
+left by the previous dispatch. The bank is statically known at every `RET`
+site, so it is now baked in as a constant. Worth writing down because it is the
+characteristic static-recompilation bug: state the hardware keeps implicitly in
+a register has to become either an explicit variable or a compile-time
+constant, and picking neither fails quietly until it doesn't.
 
 ### What the analysis says about the retail ROM
 
@@ -176,9 +250,13 @@ tamarecomp/
 ├── tools/
 │   ├── e0c6200.py       ISA decoder — flat mask table, all 4096 opcodes
 │   ├── analyze.py       NPC propagation, reachability fixpoint, JPBA discovery
-│   └── jumptables.py    JPBA target-page classification and table resolution
+│   ├── jumptables.py    JPBA target-page classification and table resolution
+│   ├── cycles.py        per-opcode cycle counts (generated)
+│   ├── gen_cycles.py    regenerates cycles.py from the reference core
+│   └── emit.py          ROM → C
 ├── tests/
-│   └── test_decode.py   self-checks (ISA coverage + whole-ROM properties)
+│   ├── test_decode.py   self-checks (ISA coverage + whole-ROM properties)
+│   └── smoke.c          runs the recompiled ROM, fails on any trap
 ├── include/tamarecomp/  runtime headers (CPU context, E0C6S46 peripherals)
 ├── src/                 runtime implementation
 ├── generated/           emitted C (gitignored)
@@ -190,7 +268,11 @@ tamarecomp/
 ```sh
 python tools/analyze.py path/to/tama.b     # report the ROM's control-flow shape
 python tools/jumptables.py path/to/tama.b  # classify and dump every jump table
-python tests/test_decode.py path/to/tama.b # run the self-checks
+python tests/test_decode.py path/to/tama.b # run the analysis self-checks
+
+cmake -B build -DTAMA_ROM=path/to/tama.b   # recompile the ROM and build it
+cmake --build build
+ctest --test-dir build                     # runs the smoke test
 ```
 
 The ROM check is skipped if you don't pass a path, so the ISA tests run
