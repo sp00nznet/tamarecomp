@@ -57,3 +57,22 @@ add_test(NAME smoke COMMAND smoke)
 add_executable(lcdprobe tests/lcdprobe.c)
 target_link_libraries(lcdprobe PRIVATE tamarecomp)
 add_test(NAME lcd COMMAND lcdprobe 20)
+
+# Differential test against an independent implementation of the same ISA.
+# Needs a second copy of the generated code built with the trace hook live,
+# plus an extracted BrickEmuPy checkout:
+#
+#   ctest --test-dir build            # skips difftest unless BRICKEMU_DIR is set
+#   BRICKEMU_DIR=/path/to/BrickEmuPy-main ctest --test-dir build
+add_library(tamarecomp_traced STATIC ${GENERATED} src/hw.c src/lcd.c)
+target_include_directories(tamarecomp_traced PUBLIC include)
+target_compile_definitions(tamarecomp_traced PUBLIC TAMA_TRACING)
+
+add_executable(tracedump tests/tracedump.c)
+target_link_libraries(tracedump PRIVATE tamarecomp_traced)
+
+if(DEFINED ENV{BRICKEMU_DIR})
+    add_test(NAME difftest COMMAND ${Python3_EXECUTABLE}
+             ${CMAKE_CURRENT_SOURCE_DIR}/tools/difftest.py
+             ${TAMA_ROM} $<TARGET_FILE:tracedump> 1000000)
+endif()

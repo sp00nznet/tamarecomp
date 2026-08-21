@@ -150,7 +150,10 @@ void tama_reset(tama_t *t)
 {
     memset(t, 0, sizeof(*t));
     t->pc = TAMA_VEC_RESET;
-    t->sp = 0xFF;              /* the ROM reloads this; a sane value until it does */
+    t->sp = 0;                 /* undefined on real silicon; the ROM sets it
+                                * before use. Zero matches the reference core,
+                                * which keeps tools/difftest.py comparable from
+                                * the first instruction. */
     t->hw.k0 = 0xF;            /* inputs idle high: no button held */
     t->hw.k1 = 0xF;
     t->hw.tm_at = TM_PERIOD;
