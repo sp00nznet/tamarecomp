@@ -1,12 +1,10 @@
 /* A Tamagotchi in your terminal.
  *
- *   tama [seconds]        (0 or omitted: run until ctrl-c)
+ *   tama [seconds]                 run it; 1/2/3 are the buttons, q quits
+ *   tama --record out.wav [secs]   run flat out and write what the buzzer did
  *
- * Runs the recompiled ROM in real time and redraws the 32x16 dot matrix
- * whenever it changes. Two pixel rows share one terminal line via the
- * half-block characters, so the screen keeps its aspect ratio.
- *
- * Keys 1/2/3 (or a/s/d) are the three buttons.
+ * Two pixel rows share one terminal line via the half-block characters, so the
+ * 32x16 screen keeps its aspect ratio.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -67,6 +65,73 @@ static int poll_key(void)
  * frame can be missed entirely. */
 #define HOLD_FRAMES 4
 
+/* ---------------------------------------------------------------- recording */
+
+#define RATE 22050
+
+static void put32(FILE *f, unsigned v) { fputc(v, f); fputc(v >> 8, f);
+                                         fputc(v >> 16, f); fputc(v >> 24, f); }
+static void put16(FILE *f, unsigned v) { fputc(v, f); fputc(v >> 8, f); }
+
+/* Run the machine flat out and write the buzzer to a mono 16-bit WAV.
+ *
+ * The E0C6S46's buzzer is a square wave and nothing more -- one of eight tones
+ * or silence -- so this is a phase accumulator and a sign, which is why it can
+ * be done without pulling in an audio library. */
+static int record(const char *path, int seconds)
+{
+    tama_t *t = calloc(1, sizeof(tama_t));
+    FILE *f = fopen(path, "wb");
+    if (!t || !f) {
+        fprintf(stderr, "cannot write %s\n", path);
+        return 2;
+    }
+    tama_reset(t);
+
+    long nsamples = (long)seconds * RATE;
+    unsigned bytes = (unsigned)nsamples * 2;
+
+    fwrite("RIFF", 1, 4, f);  put32(f, 36 + bytes);
+    fwrite("WAVE", 1, 4, f);
+    fwrite("fmt ", 1, 4, f);  put32(f, 16);
+    put16(f, 1); put16(f, 1);                 /* PCM, mono */
+    put32(f, RATE); put32(f, RATE * 2);
+    put16(f, 2); put16(f, 16);
+    fwrite("data", 1, 4, f);  put32(f, bytes);
+
+    double phase = 0.0;
+    long rang = 0;
+    for (long i = 0; i < nsamples; i++) {
+        /* Anchor each sample to an absolute cycle rather than stepping by a
+         * fixed amount. A sample is 1.49 cycles at this rate and tama_run
+         * cannot stop mid-instruction, so a fixed step of 1 or 2 silently
+         * advances 5 to 12 and the recording comes out several times too
+         * fast. Overshoot is fine here; the loop just does not run. */
+        uint64_t want = ((uint64_t)(i + 1) * TAMA_OSC1_HZ) / RATE;
+        while (t->cycles < want)
+            tama_step(t, want - t->cycles);
+
+        unsigned hz = tama_buzzer_hz(t);
+        int s = 0;
+        if (hz) {
+            rang++;
+            phase += (double)hz / RATE;
+            phase -= (double)(long)phase;
+            s = (phase < 0.5) ? 9000 : -9000;
+        } else {
+            phase = 0.0;
+        }
+        put16(f, (unsigned)(s & 0xFFFF));
+    }
+    fclose(f);
+    printf("%s: %d s, buzzer sounding for %.2f s\n",
+           path, seconds, (double)rang / RATE);
+    free(t);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ display */
+
 static uint8_t key_to_button(int c)
 {
     switch (c) {
@@ -78,7 +143,7 @@ static uint8_t key_to_button(int c)
 }
 
 static void draw(const uint8_t px[TAMA_LCD_H][TAMA_LCD_W], uint64_t secs,
-                 uint8_t held)
+                 uint8_t held, unsigned hz)
 {
     printf("\033[H\033[2J");
     printf("  .--------------------------------.\n");
@@ -86,16 +151,16 @@ static void draw(const uint8_t px[TAMA_LCD_H][TAMA_LCD_W], uint64_t secs,
         fputs("  |", stdout);
         for (int x = 0; x < TAMA_LCD_W; x++) {
             int top = px[y][x], bot = px[y + 1][x];
-            fputs(top && bot ? "█" : top ? "▀" : bot ? "▄" : " ",
-                  stdout);
+            fputs(top && bot ? "█" : top ? "▀" : bot ? "▄" : " ", stdout);
         }
         fputs("|\n", stdout);
     }
     printf("  '--------------------------------'\n");
-    printf("       %s   %s   %s\n",
+    printf("       %s   %s   %s      %s\n",
            (held & TAMA_BTN_LEFT)   ? "[1]" : " 1 ",
            (held & TAMA_BTN_MIDDLE) ? "[2]" : " 2 ",
-           (held & TAMA_BTN_RIGHT)  ? "[3]" : " 3 ");
+           (held & TAMA_BTN_RIGHT)  ? "[3]" : " 3 ",
+           hz ? "♪" : " ");
     printf("   %llu:%02llu:%02llu elapsed          q to quit\n",
            (unsigned long long)secs / 3600,
            (unsigned long long)(secs / 60) % 60,
@@ -105,6 +170,9 @@ static void draw(const uint8_t px[TAMA_LCD_H][TAMA_LCD_W], uint64_t secs,
 
 int main(int argc, char **argv)
 {
+    if (argc > 2 && strcmp(argv[1], "--record") == 0)
+        return record(argv[2], (argc > 3) ? atoi(argv[3]) : 10);
+
     long limit = (argc > 1) ? strtol(argv[1], NULL, 10) : 0;   /* 0 = forever */
     tama_t *t = calloc(1, sizeof(tama_t));
     if (!t)
@@ -115,7 +183,8 @@ int main(int argc, char **argv)
 
     uint8_t px[TAMA_LCD_H][TAMA_LCD_W], prev[TAMA_LCD_H][TAMA_LCD_W];
     memset(prev, 0xFF, sizeof prev);
-    uint8_t held = 0;
+    uint8_t held = 0, last_held = 0xFF;
+    unsigned last_hz = 0xFFFFFFFFu;
     int hold_left = 0;
 
     for (;;) {
@@ -139,12 +208,14 @@ int main(int argc, char **argv)
             return 1;
         }
 
+        unsigned hz = tama_buzzer_hz(t);
         tama_lcd_read(t, px);
-        static uint8_t last_held = 0xFF;
-        if (memcmp(px, prev, sizeof px) != 0 || held != last_held) {
-            draw(px, t->cycles / TAMA_OSC1_HZ, held);
+        if (memcmp(px, prev, sizeof px) != 0 || held != last_held
+                || hz != last_hz) {
+            draw(px, t->cycles / TAMA_OSC1_HZ, held, hz);
             memcpy(prev, px, sizeof px);
             last_held = held;
+            last_hz = hz;
         }
 
         if (limit && t->cycles >= (uint64_t)limit * TAMA_OSC1_HZ)

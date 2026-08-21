@@ -63,6 +63,17 @@ add_executable(buttons tests/buttons.c)
 target_link_libraries(buttons PRIVATE tamarecomp)
 add_test(NAME buttons COMMAND buttons)
 
+# The ROM drives nothing outside the dot matrix, which is why there is no icon
+# rendering code. Fails if that ever stops being true.
+add_executable(iconprobe tests/iconprobe.c)
+target_link_libraries(iconprobe PRIVATE tamarecomp)
+add_test(NAME icons COMMAND iconprobe)
+
+# The power-on chime: R4's active-low enable and the tone table.
+add_executable(buzzprobe tests/buzzprobe.c)
+target_link_libraries(buzzprobe PRIVATE tamarecomp)
+add_test(NAME buzzer COMMAND buzzprobe)
+
 # Differential test against an independent implementation of the same ISA.
 # Needs a second copy of the generated code built with the trace hook live,
 # plus an extracted BrickEmuPy checkout:

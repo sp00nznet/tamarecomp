@@ -29,6 +29,27 @@ static const uint32_t PT_PERIOD[8] = {
     TAMA_OSC1_HZ / 2048, TAMA_OSC1_HZ / 4096, TAMA_OSC1_HZ / 8192,
 };
 
+/* Buzzer. The E0C6S46 divides OSC1 down to one of eight tones; those divisors
+ * give 4096 Hz at the top down to 1170 Hz, which is the whole vocabulary a
+ * Tamagotchi has for being pleased or annoyed with you.
+ *
+ * Two things gate it, and one of them is inverted: R4 bit 3 is the buzzer
+ * enable, active *low*, while BZ2's one-shot bit fires a fixed-length pulse
+ * regardless. */
+static const uint16_t BUZZER_DIV[8] = { 8, 10, 12, 14, 16, 20, 24, 28 };
+
+#define R4_BZE     8      /* R4 bit 3: 0 sounds the buzzer, 1 silences it */
+#define BZ1_SHOTPW 8      /* one-shot pulse width select */
+#define BZ1_FREQ   7      /* tone select */
+#define BZ2_SHOT   8      /* writing 1 fires a one-shot */
+#define BZ2_ENVRST 4
+#define BZ2_ENVRT  2      /* envelope period select */
+#define BZ2_ENVON  1
+
+/* One-shot pulse lengths, in OSC1 cycles. */
+#define SHOT_SHORT (8 * 128)
+#define SHOT_LONG  (16 * 128)
+
 /* Interrupt factor bits within the clock-timer factor nibble. */
 #define IT_1HZ   8
 #define IT_2HZ   4
@@ -66,6 +87,12 @@ static uint8_t io_read(tama_t *t, uint16_t addr)
     case 0xF26: return h->pt_reload & 0xF;
     case 0xF27: return h->pt_reload >> 4;
 
+    /* BZ2 reads back the envelope bits plus whether a one-shot is still
+     * ringing, which is how the ROM waits for a beep to finish. */
+    case 0xF75:
+        return (uint8_t)((h->bz2 & (BZ2_ENVRT | BZ2_ENVON))
+                         | (t->cycles < h->shot_until ? BZ2_SHOT : 0));
+
     case 0xF40: return h->k0;
     case 0xF42: return h->k1;
 
@@ -93,14 +120,22 @@ static void io_write(tama_t *t, uint16_t addr, uint8_t v)
     case 0xF26: h->pt_reload = (h->pt_reload & 0xF0) | v; break;
     case 0xF27: h->pt_reload = (h->pt_reload & 0x0F) | (uint8_t)(v << 4); break;
 
-    case 0xF50: case 0xF51: case 0xF52: case 0xF53: case 0xF54:
+    case 0xF50: case 0xF51: case 0xF52: case 0xF53:
         h->r[addr - 0xF50] = v;
+        break;
+    case 0xF54:                          /* R4 bit 3 is the buzzer enable */
+        h->r[4] = v;
         break;
 
     case 0xF71: h->lcd_ctrl = v; break;
     case 0xF72: h->lc = v;       break;
     case 0xF74: h->bz1 = v;      break;
-    case 0xF75: h->bz2 = v;      break;
+    case 0xF75:
+        h->bz2 = v & (BZ2_ENVRT | BZ2_ENVON);
+        if (v & BZ2_SHOT)
+            h->shot_until = t->cycles + ((h->bz1 & BZ1_SHOTPW) ? SHOT_LONG
+                                                               : SHOT_SHORT);
+        break;
 
     case 0xF76:                          /* bit 1 resets the clock timer */
         if (v & 2) {
@@ -156,10 +191,25 @@ void tama_reset(tama_t *t)
                                 * the first instruction. */
     t->hw.k0 = 0xF;            /* inputs idle high: no button held */
     t->hw.k1 = 0xF;
+    t->hw.r[4] = 0xF;          /* R4 idles high through its pull-ups, and bit 3
+                                * is the buzzer enable active low -- start it
+                                * at 0 and the device screams from reset until
+                                * the ROM's init happens to write the port. */
     t->hw.tm_at = TM_PERIOD;
     t->hw.sw_at = SW_PERIOD;
     t->hw.pt_at = TM_PERIOD;
 }
+
+unsigned tama_buzzer_hz(const tama_t *t)
+{
+    const tama_hw_t *h = &t->hw;
+    int sounding = !(h->r[4] & R4_BZE) || t->cycles < h->shot_until;
+
+    if (!sounding)
+        return 0;
+    return TAMA_OSC1_HZ / BUZZER_DIV[h->bz1 & BZ1_FREQ];
+}
+
 
 void tama_set_buttons(tama_t *t, uint8_t mask)
 {

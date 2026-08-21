@@ -60,8 +60,7 @@ Result on the retail ROM: **zero unresolved control transfers.**
 
 ## Status
 
-It boots, keeps time, animates, and takes button presses. What is missing is
-the icon row and the buzzer.
+It boots, keeps time, animates, takes button presses and sounds its chime.
 
 | Stage | State |
 |---|---|
@@ -72,16 +71,18 @@ the icon row and the buzzer.
 | **E0C6S46 runtime** — timers, interrupts, K0 buttons | ✅ complete |
 | **LCD** — the 32×16 dot matrix | ✅ complete |
 | **Differential test** — 1M instructions vs an independent core | ✅ zero divergence |
-| **Icons** — the 8 segments outside the matrix | ⬜ not started |
-| **Buzzer** — R4 / BZ1 / BZ2 | ⬜ not started |
+| **Buzzer** — tone, one-shot, WAV recording | ✅ complete |
+| **Icons** | ✅ none exist — drawn in the matrix, see below |
 
 ```
 $ ctest
     Start 1: smoke      Passed      boots, runs a minute, never leaves the ROM
     Start 2: lcd        Passed      the screen changes over time
     Start 3: buttons    Passed      a press puts something new on screen
-    Start 4: difftest   Passed      1,000,000 instructions, no divergence
-100% tests passed, 0 tests failed out of 4
+    Start 4: icons      Passed      nothing is driven outside the matrix
+    Start 5: buzzer     Passed      the power-on chime, 2340 Hz
+    Start 6: difftest   Passed      1,000,000 instructions, no divergence
+100% tests passed, 0 tests failed out of 6
 ```
 
 ```
@@ -189,20 +190,70 @@ registers, all of them during init.
 
 ### The LCD
 
-The E0C6S46 spreads 640 segments over 160 nibbles in two blocks. For the dot
-matrix the arrangement is column-major in fours — each screen column owns four
-nibbles, each nibble holds four vertically adjacent pixels:
+The E0C6S46 spreads 640 segments over 160 nibbles in two blocks. Vertically the
+arrangement is regular — each screen column owns four nibbles, each holding
+four vertically adjacent pixels. **Horizontally there is no formula at all.**
+The segment lines are PCB routing: they count up in twos, skip a pair at
+x=8, and then run *backwards* from x=16.
 
 ```c
-addr = (y >= 8 ? 0xE80 : 0xE00) + 2 * x + ((y >> 2) & 1);
-bit  = y & 3;
+nibble = COL_NIBBLE[x] + ((y >> 2) & 1) + (y >= 8 ? 80 : 0);
+bit    = y & 3;
+
+{  0,  2,  4,  6,  8, 10, 12, 14,     /* x 0-7:   straight run         */
+  18, 20, 22, 24, 26, 28, 30, 32,     /* x 8-15:  after a skipped pair */
+  72, 70, 68, 66, 64, 62, 60, 58,     /* x 16-23: and now backwards    */
+  54, 52, 50, 48, 46, 44, 42, 40 }    /* x 24-31: still backwards      */
 ```
 
-That is not a guess. It is read off the segment geometry in BrickEmuPy's
-`TamagotchiP1.svg`, whose element ids are `<nibble>_<bit>` — the positions
-resolve to exactly 32 distinct x by 16 distinct y, with all 512 cells
-accounted for. (It also happens to match the first thing I tried, which I only
-believed once the SVG said so.)
+`COL_NIBBLE` is read off the segment geometry in BrickEmuPy's
+`TamagotchiP1.svg`, whose element ids are `<nibble>_<bit>` and whose positions
+resolve to exactly 32 distinct x by 16 distinct y. The table reproduces all 512
+cells with nothing left over.
+
+Assuming a formula here is the trap, and it is a quiet one. `2 * x` is correct
+for x = 0..7 and wrong for the other 24 columns — which still draws *a*
+picture, just not the one the ROM meant. The sprite happened to sit in the
+left eighth of the screen, so it looked plausible for a while.
+
+### There are no icons
+
+The P1 has an icon row — food, light, game, medicine and the rest — and the
+obvious assumption is that each is its own LCD segment, sitting in the 32
+nibbles the dot matrix leaves unused. It is not.
+
+Instrumenting every address in `0xE00-0xEFF` across a run that walks the whole
+menu shows the ROM changing 88 addresses, **every one of them inside the matrix
+and none outside it**. The icon row is drawn *in the dot matrix*, which is also
+why the face SVG defines exactly 512 segments and nothing else. So there is no
+icon code, and `tests/iconprobe.c` fails if that ever stops being true.
+
+### The buzzer
+
+`R4` bit 3 is the buzzer enable, **active low**, and `BZ1` picks one of eight
+tones by dividing OSC1 — 4096 Hz down to 1170 Hz, the entire vocabulary a
+Tamagotchi has for being pleased or annoyed with you. `BZ2` carries the
+envelope and a one-shot pulse whose "still ringing" bit reads back, which is
+how the ROM waits for a beep to finish.
+
+The device sounds a power-on chime and the register trace shows exactly how:
+
+```
+0.1295s  R4=F BZ1=3 BZ2=0  ->    0 Hz    tone selected, buzzer still disabled
+0.1299s  R4=7 BZ1=3 BZ2=0  -> 2340 Hz    bit 3 pulled low
+1.4728s  R4=F BZ1=3 BZ2=0  ->    0 Hz    released
+```
+
+`tama --record out.wav 4` writes that to a mono WAV with no audio library
+involved — the buzzer is a square wave and nothing more, so it is a phase
+accumulator and a sign. The recorded chime measures 2340 Hz lasting 1.343 s,
+matching the register trace.
+
+One trap worth naming: a sample at 22050 Hz is 1.49 CPU cycles, and `tama_run`
+cannot stop mid-instruction. Stepping by a fixed 1 or 2 cycles per sample
+silently advances 5 to 12 and the recording comes out **4.7× too fast** —
+still a clean tone at the right pitch, just wrong about time. Each sample is
+anchored to an absolute cycle instead.
 
 ### Buttons
 
@@ -370,6 +421,8 @@ tamarecomp/
 │   ├── smoke.c          boots and runs a minute, fails on any trap
 │   ├── lcdprobe.c       dumps every distinct frame the ROM draws
 │   ├── buttons.c        a press must put something new on screen
+│   ├── iconprobe.c      nothing may be driven outside the dot matrix
+│   ├── buzzprobe.c      the power-on chime
 │   └── tracedump.c      per-instruction state dump for difftest
 ├── include/tamarecomp/  runtime headers (CPU context, peripherals, LCD)
 ├── generated/           emitted C (gitignored)
@@ -386,6 +439,7 @@ python tests/test_decode.py path/to/tama.b # run the analysis self-checks
 cmake -B build -DTAMA_ROM=path/to/tama.b   # recompile the ROM and build it
 cmake --build build
 ./build/tama                               # a Tamagotchi. 1/2/3 are the buttons
+./build/tama --record chime.wav 4          # record what the buzzer does
 
 ctest --test-dir build                     # smoke, lcd, buttons
 BRICKEMU_DIR=/path/to/BrickEmuPy-main ctest --test-dir build   # + difftest

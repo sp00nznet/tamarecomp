@@ -50,7 +50,8 @@ typedef struct tama_hw {
     uint8_t  k0, k1;          /* key input ports; a 0 bit means pressed */
     uint8_t  r[5];            /* output port, drives the buzzer among others */
     uint8_t  lcd_ctrl, lc;    /* LCD control and contrast */
-    uint8_t  bz1, bz2;        /* buzzer */
+    uint8_t  bz1, bz2;        /* buzzer tone and envelope control */
+    uint64_t shot_until;      /* cycle a one-shot pulse stops ringing */
 
     uint64_t tm_at, sw_at, pt_at;   /* cycle counts of the next timer edges */
 } tama_hw_t;
@@ -97,5 +98,9 @@ void tama_step(tama_t *t, uint64_t cycles);
 #define TAMA_BTN_MIDDLE 0x2
 #define TAMA_BTN_RIGHT  0x1
 void tama_set_buttons(tama_t *t, uint8_t mask);
+
+/* The tone the buzzer is sounding right now, in Hz, or 0 for silence. The
+ * E0C6S46 has eight tones between 1170 and 4096 Hz and nothing else. */
+unsigned tama_buzzer_hz(const tama_t *t);
 
 #endif
