@@ -58,6 +58,11 @@ add_executable(lcdprobe tests/lcdprobe.c)
 target_link_libraries(lcdprobe PRIVATE tamarecomp)
 add_test(NAME lcd COMMAND lcdprobe 20)
 
+# Buttons reach the ROM and change what is on screen.
+add_executable(buttons tests/buttons.c)
+target_link_libraries(buttons PRIVATE tamarecomp)
+add_test(NAME buttons COMMAND buttons)
+
 # Differential test against an independent implementation of the same ISA.
 # Needs a second copy of the generated code built with the trace hook live,
 # plus an extracted BrickEmuPy checkout:

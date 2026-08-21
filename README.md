@@ -60,35 +60,55 @@ Result on the retail ROM: **zero unresolved control transfers.**
 
 ## Status
 
-The ROM compiles to C and the C runs. What is missing is the hardware around
-it: the LCD, the timers that drive the clock, and the buttons.
+It boots, keeps time, animates, and takes button presses. What is missing is
+the icon row and the buzzer.
 
 | Stage | State |
 |---|---|
 | **E0C6200 decoder** — all 4096 opcodes | ✅ complete, validated |
 | **Control-flow analysis** — NPC propagation, reachability | ✅ complete, 0 unresolved |
 | **JPBA jump-table resolution** — classify and resolve all target pages | ✅ complete |
-| **C emitter** — ROM → native C | ✅ complete, runs 64M cycles clean |
-| **E0C6S46 runtime** — LCD, timers, buzzer, buttons, interrupts | 🔨 next |
-| **Host frontend** — render the 32×16 dot matrix + icons | ⬜ not started |
+| **C emitter** — ROM → native C | ✅ complete |
+| **E0C6S46 runtime** — timers, interrupts, K0 buttons | ✅ complete |
+| **LCD** — the 32×16 dot matrix | ✅ complete |
+| **Differential test** — 1M instructions vs an independent core | ✅ zero divergence |
+| **Icons** — the 8 segments outside the matrix | ⬜ not started |
+| **Buzzer** — R4 / BZ1 / BZ2 | ⬜ not started |
+
+```
+$ ctest
+    Start 1: smoke      Passed      boots, runs a minute, never leaves the ROM
+    Start 2: lcd        Passed      the screen changes over time
+    Start 3: buttons    Passed      a press puts something new on screen
+    Start 4: difftest   Passed      1,000,000 instructions, no divergence
+100% tests passed, 0 tests failed out of 4
+```
+
+```
+  .--------------------------------.
+  |                                |
+  |               ▄█▄              |
+  |              █▄██              |
+  |             ████               |
+  |             █▄▄██              |
+  |              ▀██▀              |
+  |             ▀▀▀▀               |
+  |                                |
+  '--------------------------------'
+       [1]   2    3
+   0:01:47 elapsed          q to quit
+```
 
 ### The recompiled output
 
 ```
 $ python tools/emit.py tama.b generated/tama_rom.c
-generated/tama_rom.c: 41631 lines from 6144 ROM words
-
-$ clang -std=c11 -O2 -Wall -Wextra -Iinclude ...
-$ ./smoke
-ok: 64000324 cycles, pc=0x00F0, sp=0xF3, a=0 b=9 x=1B0 y=100,
-    0 halt-resumes, 8 display nibbles set, no traps
+generated/tama_rom.c: 47567 lines from 6144 ROM words
 ```
 
-64 million cycles in under a second — roughly **2,000× the real hardware's
-32,768 Hz** — with no traps, and eight nibbles of display RAM written, meaning
-the boot path got as far as the LCD driver rather than spinning in place.
-
-It builds clean under `-Wall -Wextra` at `-O2`.
+Builds clean under `-Wall -Wextra` at `-O2`. Left to run flat out with no
+timers it does 64 million cycles in under a second — roughly **2,000× the
+hardware's 32,768 Hz**.
 
 ### What the generated C looks like
 
@@ -145,6 +165,92 @@ site, so it is now baked in as a constant. Worth writing down because it is the
 characteristic static-recompilation bug: state the hardware keeps implicitly in
 a register has to become either an explicit variable or a compile-time
 constant, and picking neither fails quietly until it doesn't.
+
+## The device around the CPU
+
+### Interrupts, for free
+
+The recompiled ROM has no notion of time, and nothing in the generated code
+knows interrupts exist. It did not need to: `tama_run` already returns when its
+cycle budget is spent, which is exactly the shape interrupt delivery wants.
+`tama_step` sets the budget to the next timer edge, so the CPU comes back on
+its own at the moment something is due, and the runtime pushes three nibbles
+and vectors just like a `CALL`. No polling, no per-instruction check, no
+regeneration.
+
+The clock timer is the device's heartbeat: an 8-bit counter stepping at 256 Hz
+whose bits 2, 4, 6 and 7 falling give the 32/8/2/1 Hz interrupt factors. The
+ROM unmasks the **1 Hz** one, and that is what makes a Tamagotchi age, get
+hungry, and misbehave.
+
+The peripheral work was scoped by measurement rather than by implementing all
+of `0xF00-0xF7F` on spec: an instrumented run showed the ROM touches 21
+registers, all of them during init.
+
+### The LCD
+
+The E0C6S46 spreads 640 segments over 160 nibbles in two blocks. For the dot
+matrix the arrangement is column-major in fours — each screen column owns four
+nibbles, each nibble holds four vertically adjacent pixels:
+
+```c
+addr = (y >= 8 ? 0xE80 : 0xE00) + 2 * x + ((y >> 2) & 1);
+bit  = y & 3;
+```
+
+That is not a guess. It is read off the segment geometry in BrickEmuPy's
+`TamagotchiP1.svg`, whose element ids are `<nibble>_<bit>` — the positions
+resolve to exactly 32 distinct x by 16 distinct y, with all 512 cells
+accounted for. (It also happens to match the first thing I tried, which I only
+believed once the SVG said so.)
+
+### Buttons
+
+Three buttons on `K0`, active low, with a falling edge raising the K0
+interrupt factor. **Left is bit 2 and right is bit 0** — taken from
+`TamagotchiP1.brick`, because a left-to-right numbering gets them mirrored and
+nothing about a mirrored Tamagotchi looks wrong until you try to use a menu.
+
+## Validation: 1M instructions against an independent core
+
+36 opcodes' worth of flag semantics were written into the emitter by hand, and
+the carry and decimal edges are where a bug hides without ever crashing.
+`tools/difftest.py` runs BrickEmuPy's E0C6200 core beside ours and compares
+`pc, A, B, X, Y, SP, flags` on every instruction. It is a worthwhile check
+precisely because that core was written by someone else, from the same Epson
+documentation, in another language.
+
+Recompiled code has no per-instruction observation point — that is rather the
+point of it — so the emitter carries a `TAMA_TRACE` hook that compiles to
+nothing unless `TAMA_TRACING` is defined.
+
+**It found a real bug 1,486 instructions in.**
+
+```
+RST F, i   is   F <- F AND i
+```
+
+It *keeps* the bits named in `i` and clears the rest, which is the opposite of
+the obvious reading, and the emitter had it inverted. Completely silent: the
+ROM ran, the screen drew, the device animated, and a comparison flag was
+quietly wrong. With it fixed the boot path writes twice as many display
+nibbles and the sprite resolves into a coherent creature.
+
+Two more failures showed up first, neither of them a CPU bug, both worth
+knowing about because each looks exactly like one:
+
+- Windows `stdout` is a text stream, and it expanded every `0x0A` byte in the
+  binary trace into `0x0D 0x0A`. The giveaway was `X = 0x0A0D` — an impossible
+  value for a 12-bit register, with the culprit bytes sitting right there in
+  it.
+- The reference advances its oscillator inside every `clock()` while our
+  runtime only moves time in `tama_step`, so the ROM's read of the
+  interrupt-factor register at `0xF00` disagreed by one tick. Timers are frozen
+  on both sides now; the test is about the CPU.
+
+After that: **1,000,000 instructions, zero divergence.**
+
+## Inside the ROM
 
 ### What the analysis says about the retail ROM
 
@@ -253,12 +359,19 @@ tamarecomp/
 │   ├── jumptables.py    JPBA target-page classification and table resolution
 │   ├── cycles.py        per-opcode cycle counts (generated)
 │   ├── gen_cycles.py    regenerates cycles.py from the reference core
-│   └── emit.py          ROM → C
+│   ├── emit.py          ROM → C
+│   └── difftest.py      per-instruction comparison against a reference core
+├── src/
+│   ├── hw.c             E0C6S46 I/O map, timers, interrupt delivery
+│   ├── lcd.c            display RAM → 32×16 pixels
+│   └── main.c           terminal frontend
 ├── tests/
 │   ├── test_decode.py   self-checks (ISA coverage + whole-ROM properties)
-│   └── smoke.c          runs the recompiled ROM, fails on any trap
-├── include/tamarecomp/  runtime headers (CPU context, E0C6S46 peripherals)
-├── src/                 runtime implementation
+│   ├── smoke.c          boots and runs a minute, fails on any trap
+│   ├── lcdprobe.c       dumps every distinct frame the ROM draws
+│   ├── buttons.c        a press must put something new on screen
+│   └── tracedump.c      per-instruction state dump for difftest
+├── include/tamarecomp/  runtime headers (CPU context, peripherals, LCD)
 ├── generated/           emitted C (gitignored)
 └── docs/
 ```
@@ -272,7 +385,10 @@ python tests/test_decode.py path/to/tama.b # run the analysis self-checks
 
 cmake -B build -DTAMA_ROM=path/to/tama.b   # recompile the ROM and build it
 cmake --build build
-ctest --test-dir build                     # runs the smoke test
+./build/tama                               # a Tamagotchi. 1/2/3 are the buttons
+
+ctest --test-dir build                     # smoke, lcd, buttons
+BRICKEMU_DIR=/path/to/BrickEmuPy-main ctest --test-dir build   # + difftest
 ```
 
 The ROM check is skipped if you don't pass a path, so the ISA tests run
@@ -295,8 +411,13 @@ decoder goes wrong:
 
 - Opcode table cross-checked against **[BrickEmuPy](https://github.com/azya52/BrickEmuPy)**'s
   `E0C6200dasm.py` (CC0) and the Epson E0C6200/E0C6200A core manual.
-- **[TamaLIB](https://github.com/jcrona/tamalib)** by Jean-Christophe Rona is the
-  reference emulator this project validates against.
+- **[TamaLIB](https://github.com/jcrona/tamalib)** by Jean-Christophe Rona is
+  the other open Tamagotchi implementation, and the reason anyone knows this
+  hardware is tractable at all.
+
+BrickEmuPy in particular does double duty here: its core is the oracle
+`tools/difftest.py` compares against, and its `TamagotchiP1.svg` is where the
+LCD segment map came from. Being CC0 is what made both possible.
 
 ## License
 

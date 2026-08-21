@@ -88,10 +88,14 @@ void tama_reset(tama_t *t);
  * point a frontend calls; tama_run on its own has no notion of time passing. */
 void tama_step(tama_t *t, uint64_t cycles);
 
-/* Buttons, left to right. A 1 bit means held. */
-#define TAMA_BTN_LEFT   0x1
+/* Buttons, as wired to K0 on the P1: left is bit 2, right is bit 0. The values
+ * are the actual K0 lines, taken from BrickEmuPy's TamagotchiP1.brick, not a
+ * left-to-right numbering -- guessing that gets them mirrored.
+ *
+ * Pass a mask of held buttons; the lines are active low inside. */
+#define TAMA_BTN_LEFT   0x4
 #define TAMA_BTN_MIDDLE 0x2
-#define TAMA_BTN_RIGHT  0x4
+#define TAMA_BTN_RIGHT  0x1
 void tama_set_buttons(tama_t *t, uint8_t mask);
 
 #endif
