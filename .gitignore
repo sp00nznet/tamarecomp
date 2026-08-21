@@ -1,0 +1,9 @@
+# No ROM data in this repo. Bring your own dump.
+rom/
+*.b
+*.bin
+
+generated/
+build/
+__pycache__/
+*.pyc
