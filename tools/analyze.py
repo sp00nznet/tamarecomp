@@ -13,6 +13,7 @@ and even that is bounded to the 256 steps of one statically-known page.
 import sys
 from collections import defaultdict
 from e0c6200 import decode, load_rom
+from jumptables import targets as jpba_targets
 
 # E0C6S46 vector table: reset plus six interrupt sources, two words apart.
 VECTORS = [
@@ -85,6 +86,26 @@ def analyze(words):
         work.append((va, va & 0x1F00))
 
     unresolved = []
+    # Fixpoint: tracing resolves JPBA sites, whose target pages contain further
+    # JPBA sites (bank 1 is reached only through the dispatcher in page 0x10),
+    # so the trace has to be re-run until no new site appears.
+    opened = set()
+    while True:
+        _trace(words, ops, reached, entries, edges, unresolved, work)
+        fresh = {(a, p) for a, ps in JPBA_SITES.items() for p in ps} - opened
+        if not fresh:
+            break
+        opened |= fresh
+        # Sound target set: every step of the page. Narrowing to the entries a
+        # table actually has would need a proof of the index range that the ROM
+        # does not give us -- see jumptables.py for what the tables really are.
+        for _, page in fresh:
+            for step in jpba_targets(ops, page):
+                work.append((page | step, page))
+    return ops, illegal, reached, entries, edges, unresolved
+
+
+def _trace(words, ops, reached, entries, edges, unresolved, work):
     while work:
         a, npc = work.pop()
         if a >= len(words):
@@ -111,7 +132,6 @@ def analyze(words):
         if op.kind == "pset":
             # the fall-through carries the *constant* page, not the address's
             work[-1] = (succs[0][0], fall_npc)
-    return ops, illegal, reached, entries, edges, unresolved
 
 
 def main(path):
@@ -134,23 +154,23 @@ def main(path):
     print(f"entry points    {len(entries)} (7 vectors + {len(entries) - 7} call targets)")
     print(f"unresolved      {len(unresolved)}")
     print()
-    pages = set()
-    for v in JPBA_SITES.values():
-        pages |= v
-    tbl = set()
+    from jumptables import classify
+    pages = sorted({p for v in JPBA_SITES.values() for p in v})
+    print(f"JPBA sites      {len(JPBA_SITES)} across {len(pages)} pages, "
+          f"each site resolving to "
+          f"{max(len(v) for v in JPBA_SITES.values()) if JPBA_SITES else 0} page")
     for p in pages:
-        tbl |= set(range(p, p + 256))
-    upper = set(reached) | tbl
-    print(f"JPBA sites      {len(JPBA_SITES)}, each with exactly "
-          f"{max(len(v) for v in JPBA_SITES.values()) if JPBA_SITES else 0} target page")
-    for a in sorted(JPBA_SITES):
-        pgs = ", ".join(f"0x{p:04X}-0x{p | 0xFF:04X}" for p in sorted(JPBA_SITES[a]))
-        print(f"  0x{a:04X} -> {pgs}")
+        kind, steps, stride = classify(ops, p)
+        users = sorted(a for a in JPBA_SITES if p in JPBA_SITES[a])
+        print(f"  0x{p:04X}  {kind:<5} {len(steps):>3} targets   <- "
+              + " ".join(f"0x{u:04X}" for u in users))
     print()
-    print(f"proven code     {len(reached):5}  {100 * len(reached) / n:.1f}%")
-    print(f"+ JPBA pages    {len(tbl):5}  {100 * len(tbl) / n:.1f}%  ({len(pages)} pages)")
-    print(f"code upper bnd  {len(upper):5}  {100 * len(upper) / n:.1f}%")
-    print(f"provably data   {n - len(upper):5}  {100 * (n - len(upper)) / n:.1f}%")
+
+    unreached = [a for a in range(n) if a not in reached]
+    pad = sum(1 for a in unreached if ops[a].mnem in ("NOP7", "NOP5"))
+    print(f"reachable code  {reach:5}  {100 * reach / n:.1f}%")
+    print(f"unreached       {len(unreached):5}  {100 * len(unreached) / n:.1f}%"
+          f"  ({pad} of it end-of-page NOP padding)")
     print()
     print("control flow (reachable):")
     for k in ("jp", "jpc", "call", "calz", "jpba", "ret", "halt", "pset"):

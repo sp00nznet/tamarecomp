@@ -9,6 +9,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
 from e0c6200 import decode, load_rom          # noqa: E402
 import analyze                                # noqa: E402
+import jumptables                             # noqa: E402
 
 # The E0C6200 has exactly 74 unassigned opcodes out of 4096. If a decoder edit
 # changes this number it has either invented or lost an instruction.
@@ -54,16 +55,67 @@ def test_rom(path):
     for a, pages in analyze.JPBA_SITES.items():
         assert len(pages) == 1, f"JPBA at 0x{a:04X} reaches {len(pages)} pages"
 
-    assert len(reached) > 1900, f"only {len(reached)} words proven reachable"
-    print("rom      ok  (%d words, %d proven code, %d JPBA sites, 0 unresolved)"
+    assert len(reached) > 5800, f"only {len(reached)} words proven reachable"
+
+    # everything the trace misses is padding or an unused vector slot -- no
+    # reachable instruction should be left behind
+    unreached = [a for a in range(len(words)) if a not in reached]
+    assert len(unreached) < 400, f"{len(unreached)} words unreached"
+
+    print("rom      ok  (%d words, %d reachable, %d JPBA sites, 0 unresolved)"
           % (len(words), len(reached), len(analyze.JPBA_SITES)))
+
+
+def test_jump_tables(path):
+    words = load_rom(path)
+    analyze.analyze(words)
+    ops = {a: decode(a, w) for a, w in enumerate(words)}
+    kinds = {}
+    for pages in analyze.JPBA_SITES.values():
+        for p in pages:
+            kinds[p] = jumptables.classify(ops, p)[0]
+
+    # the two dispatch tables, with the targets they must resolve to
+    assert kinds[0x0300] == "jump"
+    assert kinds[0x0700] == "jump"
+    _, steps, stride = jumptables.classify(ops, 0x0300)
+    assert len(steps) == 7 and stride == 1
+    _, steps, stride = jumptables.classify(ops, 0x0700)
+    assert len(steps) == 8 and stride == 2
+    assert [(0x0700 | s) for s in steps][:2] == [0x0700, 0x0702]
+
+    # bank 1 is gated by a single 8-entry re-dispatcher at the top of page 0x10
+    assert kinds[0x1000] == "tramp"
+    _, steps, stride = jumptables.classify(ops, 0x1000)
+    assert len(steps) == 8 and stride == 4
+
+    # ... and the pages it opens are byte tables, not loose code
+    assert sum(1 for p, k in kinds.items() if k == "byte") >= 10
+
+    print("tables   ok  (%d pages: %s)"
+          % (len(kinds), ", ".join(f"{k}={sum(1 for v in kinds.values() if v == k)}"
+                                   for k in ("jump", "tramp", "byte", "code"))))
+
+
+def test_no_rom_reads():
+    """The ISA has no load-from-program-memory instruction.
+
+    This is the reason the ROM is ~95% code: constants cannot be read out of
+    ROM, so they have to be *executed* out of it as RETD/LBPX byte emitters.
+    """
+    mnems = {o.mnem for o in (decode(0, w) for w in range(4096)) if o}
+    assert not (mnems & {"LDP", "LDR", "MOVP", "LDA"}), "unexpected ROM-read op"
+    assert "RETD" in mnems and "LBPX" in mnems
 
 
 if __name__ == "__main__":
     test_isa()
+    test_no_rom_reads()
+    print("isaread  ok  (no load-from-ROM instruction exists)")
     rom = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("TAMA_ROM", "rom/tama.b")
     if os.path.exists(rom):
         test_rom(rom)
+        test_jump_tables(rom)
     else:
         print("rom      skipped (no ROM at %s)" % rom)
     print("all checks passed")
