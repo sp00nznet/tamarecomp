@@ -138,8 +138,7 @@ L_0546: /* A80  ADD A, A */
     t->a = r & 0xF;
     CHECK_BUDGET(0x0547);
 L_0548: /* E47  PSET 0x07 */
-    t->cycles += 5;
-    t->if_delay = 1;                    /* the page it loads is compile-time */
+    t->cycles += 5;                     /* and nothing else -- see below */
 L_0549: /* FE8  JPBA */
     t->cycles += 5;
     t->pc = 0x0700 | (t->b << 4) | t->a;
@@ -153,9 +152,17 @@ L_054B: /* 407  CALL 0x07 */
     goto L_0307;                        /* PSET 0x03 + CALL 0x07, resolved */
 ```
 
-`PSET` leaves nothing behind but its one-instruction interrupt hold-off — all
-162 of them stop being control flow and become compile-time facts. That is the
-payoff from the NPC analysis.
+**`PSET` emits nothing at all** — all 162 of them stop being control flow and
+become compile-time facts, which is the payoff from the NPC analysis. Not even
+its one-instruction interrupt hold-off survives: that exists to keep an
+interrupt out of the gap between a `PSET` and the jump consuming the page it
+latched, and generated code has no interrupt point there. Every reachable
+`PSET` in this ROM is immediately followed by a control transfer, which the
+test suite asserts.
+
+(The listing omits one line per instruction: a `TAMA_TRACE` hook that compiles
+to nothing unless the build asks for a trace. See
+[Validation](#validation-1m-instructions-against-an-independent-core).)
 
 ### Soundness, and the one bug that mattered
 
