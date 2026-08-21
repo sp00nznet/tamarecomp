@@ -30,7 +30,7 @@ add_custom_command(
     COMMENT "Recompiling ${TAMA_ROM} to C"
     VERBATIM)
 
-add_library(tamarecomp STATIC ${GENERATED} src/mem.c)
+add_library(tamarecomp STATIC ${GENERATED} src/hw.c src/lcd.c)
 target_include_directories(tamarecomp PUBLIC include)
 
 # The generated file is one 40k-line function. MSVC needs to be told that a
@@ -41,7 +41,19 @@ else()
     target_compile_options(tamarecomp PRIVATE -Wall -Wextra)
 endif()
 
+# The Tamagotchi itself.
+add_executable(tama src/main.c)
+target_link_libraries(tama PRIVATE tamarecomp)
+
 enable_testing()
+
+# Boots, runs a minute of Tamagotchi time, never leaves the ROM.
 add_executable(smoke tests/smoke.c)
 target_link_libraries(smoke PRIVATE tamarecomp)
 add_test(NAME smoke COMMAND smoke)
+
+# The screen changes over time, which only happens if the clock timer
+# interrupt is really being delivered.
+add_executable(lcdprobe tests/lcdprobe.c)
+target_link_libraries(lcdprobe PRIVATE tamarecomp)
+add_test(NAME lcd COMMAND lcdprobe 20)

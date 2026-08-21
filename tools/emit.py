@@ -173,9 +173,15 @@ def body(op):
         return [wr(args[0], "MR(t->sp)"), "t->sp = (t->sp + 1) & 0xFF;"]
 
     if m == "PSET":
-        # The page it loads is resolved at build time, so all that survives is
-        # its one-instruction interrupt hold-off.
-        return ["t->if_delay = 1;"]
+        # Nothing survives: the page it loads is resolved at build time, and
+        # its one-instruction interrupt hold-off is redundant here. That
+        # hold-off exists to stop an interrupt landing between a PSET and the
+        # jump that consumes the page it latched -- and generated code has no
+        # interrupt point there, because every reachable PSET in this ROM is
+        # immediately followed by a control transfer (asserted in the tests)
+        # and only a *taken* transfer consumes the latch. `SET F, I` still
+        # raises if_delay; that one is real.
+        return []
 
     if m in ("NOP5", "NOP7"):
         return []
@@ -252,8 +258,7 @@ def emit(words, out):
         w("    t->cycles += %d;\n" % CYCLES[op.word])
 
         if op.kind == "pset":
-            w("    t->if_delay = 1;\n")
-            continue
+            continue                       # falls through to the next label
 
         if op.kind in ("jp", "jpc"):
             tgt = page_at(a) | (op.word & 0xFF)

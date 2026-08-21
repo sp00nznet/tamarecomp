@@ -97,6 +97,28 @@ def test_jump_tables(path):
                                    for k in ("jump", "tramp", "byte", "code"))))
 
 
+def test_pset_always_precedes_a_jump(path):
+    """Every reachable PSET is immediately followed by a control transfer.
+
+    The emitter drops PSET's one-instruction interrupt hold-off on the strength
+    of this: the hold-off exists to keep an interrupt out of the gap between a
+    PSET and the jump that consumes the page it latched, and there is no such
+    gap here. If a ROM ever breaks this, the hold-off has to come back.
+    """
+    words = load_rom(path)
+    ops, _, reached, _, _, _ = analyze.analyze(words)
+    bad = []
+    for a in sorted(reached):
+        if ops[a].kind != "pset":
+            continue
+        nxt = (a & 0x1000) | ((a + 1) & 0xFFF)
+        if ops[nxt].kind not in ("jp", "jpc", "call", "calz", "jpba"):
+            bad.append(a)
+    assert not bad, ("PSET not followed by a control transfer at "
+                     + ", ".join("0x%04X" % a for a in bad[:5]))
+    print("pset     ok  (every reachable PSET precedes a control transfer)")
+
+
 def test_no_rom_reads():
     """The ISA has no load-from-program-memory instruction.
 
@@ -116,6 +138,7 @@ if __name__ == "__main__":
     if os.path.exists(rom):
         test_rom(rom)
         test_jump_tables(rom)
+        test_pset_always_precedes_a_jump(rom)
     else:
         print("rom      skipped (no ROM at %s)" % rom)
     print("all checks passed")
