@@ -2,6 +2,16 @@
 
 **A static-recompilation toolkit for the Tamagotchi P1 — and, as far as we can tell, the first static recompiler ever built for a 4-bit CPU.**
 
+<p align="center">
+  <img src="docs/screenshot.png" width="484"
+       alt="The Tamagotchi P1 running in a window: a 32x16 dot-matrix LCD in
+            olive green showing the hatched creature, with three round buttons
+            beneath it.">
+</p>
+
+<p align="center"><em>Twenty seconds after power-on. Every instruction on that
+screen came out of a C compiler, not an interpreter.</em></p>
+
 The original 1996 Tamagotchi runs an **Epson E0C6S46**: a 4-bit microcontroller
 with a 12-bit instruction word, 6144 words of mask ROM, 4-bit data, and a
 320-segment LCD driver welded to the side of it. The entire machine is 9,216
