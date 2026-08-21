@@ -535,4 +535,14 @@ LCD segment map came from. Being CC0 is what made both possible.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE) — that covers the code in this repository: the
+decoder, the analyzer, the emitter, the runtime and the frontends.
+
+It does not and cannot cover the ROM. No ROM ships here, `tama.b` is
+`.gitignore`d, and the C the emitter produces is a derivative of the ROM you
+feed it — so whatever you generate is yours to keep to yourself. The
+disassembly quoted in this README is a couple of dozen words out of 6144, shown
+to explain how the analysis works.
+
+*Tamagotchi* is a trademark of Bandai. This project is not affiliated with or
+endorsed by them; the name is used only to say which hardware it is.
