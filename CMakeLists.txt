@@ -92,3 +92,34 @@ if(DEFINED ENV{BRICKEMU_DIR})
              ${CMAKE_CURRENT_SOURCE_DIR}/tools/difftest.py
              ${TAMA_ROM} $<TARGET_FILE:tracedump> 1000000)
 endif()
+
+# ---------------------------------------------------------------- SDL frontend
+#
+# Optional. A window with clickable buttons and the buzzer actually audible.
+# Configure with the vcpkg toolchain, or point CMAKE_PREFIX_PATH at an SDL2
+# install:
+#
+#   cmake -B build -DTAMA_ROM=... -DCMAKE_PREFIX_PATH=C:/vcpkg/installed/x64-windows
+#
+# Without SDL2 the rest of the project still builds; only this target is
+# skipped.
+find_package(SDL2 CONFIG QUIET)
+if(SDL2_FOUND)
+    add_executable(tama-sdl src/sdl_main.c)
+    target_link_libraries(tama-sdl PRIVATE tamarecomp SDL2::SDL2)
+
+    # Put SDL2.dll beside the exe so it runs from the build tree.
+    if(WIN32 AND TARGET SDL2::SDL2)
+        add_custom_command(TARGET tama-sdl POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_FILE:SDL2::SDL2> $<TARGET_FILE_DIR:tama-sdl>
+            VERBATIM)
+    endif()
+
+    # The renderer draws something, and a held button reaches the ROM through
+    # it. Runs headless under the dummy video driver.
+    add_test(NAME sdl COMMAND tama-sdl --shot ${CMAKE_CURRENT_BINARY_DIR}/shot.bmp 3)
+    set_tests_properties(sdl PROPERTIES ENVIRONMENT "SDL_VIDEODRIVER=dummy")
+else()
+    message(STATUS "SDL2 not found - skipping the tama-sdl target")
+endif()

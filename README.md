@@ -72,6 +72,7 @@ It boots, keeps time, animates, takes button presses and sounds its chime.
 | **LCD** — the 32×16 dot matrix | ✅ complete |
 | **Differential test** — 1M instructions vs an independent core | ✅ zero divergence |
 | **Buzzer** — tone, one-shot, WAV recording | ✅ complete |
+| **Frontends** — terminal, and an optional SDL window | ✅ complete |
 | **Icons** | ✅ none exist — drawn in the matrix, see below |
 
 ```
@@ -82,7 +83,8 @@ $ ctest
     Start 4: icons      Passed      nothing is driven outside the matrix
     Start 5: buzzer     Passed      the power-on chime, 2340 Hz
     Start 6: difftest   Passed      1,000,000 instructions, no divergence
-100% tests passed, 0 tests failed out of 6
+    Start 7: sdl        Passed      the window renders, headless
+100% tests passed, 0 tests failed out of 7
 ```
 
 ```
@@ -262,6 +264,52 @@ interrupt factor. **Left is bit 2 and right is bit 0** — taken from
 `TamagotchiP1.brick`, because a left-to-right numbering gets them mirrored and
 nothing about a mirrored Tamagotchi looks wrong until you try to use a menu.
 
+## Frontends
+
+Nothing that draws lives in the emulator. `src/lcd.c` does not render — it is a
+pure accessor over display RAM:
+
+```c
+int  tama_lcd_pixel(const tama_t *t, int x, int y);
+void tama_lcd_read (const tama_t *t, uint8_t out[16][32]);
+```
+
+So a frontend is three calls — `tama_audio_step` to advance time and pull
+samples, `tama_lcd_read` for pixels, `tama_set_buttons` for input — and the
+core has no idea it is being drawn. There are two, and neither one required
+touching anything else.
+
+**`tama`** — the terminal. Two pixel rows share a line via half-block
+characters, redrawing only when something changes. No dependencies at all.
+`tama --record out.wav 4` writes what the buzzer did.
+
+**`tama-sdl`** — a window with clickable buttons and audible sound. Optional:
+without SDL2 the rest of the project still builds and only this target is
+skipped.
+
+```
+cmake -B build -DTAMA_ROM=tama.b -DCMAKE_PREFIX_PATH=C:/vcpkg/installed/x64-windows
+./build/tama-sdl
+```
+
+Click the three buttons or use 1/2/3; escape quits. Audio is queued rather than
+callback-driven, because the emulator already produces samples in step with its
+own clock — there is nothing to synchronise and no lock to get wrong.
+
+`tama-sdl --shot out.bmp 2` runs unpaced and writes one frame, which works
+under `SDL_VIDEODRIVER=dummy`. That exists because a renderer you cannot look
+at is a renderer you have not tested, and it is what the `sdl` ctest runs.
+
+### Time comes from the audio clock
+
+Both frontends drive the machine through `tama_audio_step`, which advances it
+to the cycle a given sample falls on and returns that sample. Running the clock
+off the audio rate keeps picture and sound in lockstep for free, and it puts
+the one subtle bit in exactly one place: a sample is a *fraction* of a CPU
+cycle — 1.49 of them at 22050 Hz — and `tama_run` cannot stop mid-instruction.
+Step by a fixed amount per sample and it silently advances 5 to 12 instead,
+running several times too fast. Getting that wrong once was enough.
+
 ## Validation: 1M instructions against an independent core
 
 36 opcodes' worth of flag semantics were written into the emitter by hand, and
@@ -415,7 +463,8 @@ tamarecomp/
 ├── src/
 │   ├── hw.c             E0C6S46 I/O map, timers, interrupt delivery
 │   ├── lcd.c            display RAM → 32×16 pixels
-│   └── main.c           terminal frontend
+│   ├── main.c           terminal frontend, and WAV recording
+│   └── sdl_main.c       windowed frontend (optional)
 ├── tests/
 │   ├── test_decode.py   self-checks (ISA coverage + whole-ROM properties)
 │   ├── smoke.c          boots and runs a minute, fails on any trap
@@ -440,6 +489,7 @@ cmake -B build -DTAMA_ROM=path/to/tama.b   # recompile the ROM and build it
 cmake --build build
 ./build/tama                               # a Tamagotchi. 1/2/3 are the buttons
 ./build/tama --record chime.wav 4          # record what the buzzer does
+./build/tama-sdl                           # a window, if SDL2 was found
 
 ctest --test-dir build                     # smoke, lcd, buttons
 BRICKEMU_DIR=/path/to/BrickEmuPy-main ctest --test-dir build   # + difftest

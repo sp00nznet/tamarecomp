@@ -76,8 +76,8 @@ static void put16(FILE *f, unsigned v) { fputc(v, f); fputc(v >> 8, f); }
 /* Run the machine flat out and write the buzzer to a mono 16-bit WAV.
  *
  * The E0C6S46's buzzer is a square wave and nothing more -- one of eight tones
- * or silence -- so this is a phase accumulator and a sign, which is why it can
- * be done without pulling in an audio library. */
+ * or silence -- so no audio library is involved. tama_audio_step does the
+ * work and drives the machine's clock at the same time. */
 static int record(const char *path, int seconds)
 {
     tama_t *t = calloc(1, sizeof(tama_t));
@@ -99,28 +99,12 @@ static int record(const char *path, int seconds)
     put16(f, 2); put16(f, 16);
     fwrite("data", 1, 4, f);  put32(f, bytes);
 
-    double phase = 0.0;
+    tama_audio_t au = { 0.0, 0 };
     long rang = 0;
     for (long i = 0; i < nsamples; i++) {
-        /* Anchor each sample to an absolute cycle rather than stepping by a
-         * fixed amount. A sample is 1.49 cycles at this rate and tama_run
-         * cannot stop mid-instruction, so a fixed step of 1 or 2 silently
-         * advances 5 to 12 and the recording comes out several times too
-         * fast. Overshoot is fine here; the loop just does not run. */
-        uint64_t want = ((uint64_t)(i + 1) * TAMA_OSC1_HZ) / RATE;
-        while (t->cycles < want)
-            tama_step(t, want - t->cycles);
-
-        unsigned hz = tama_buzzer_hz(t);
-        int s = 0;
-        if (hz) {
+        int16_t s = tama_audio_step(t, &au, RATE);
+        if (s)
             rang++;
-            phase += (double)hz / RATE;
-            phase -= (double)(long)phase;
-            s = (phase < 0.5) ? 9000 : -9000;
-        } else {
-            phase = 0.0;
-        }
         put16(f, (unsigned)(s & 0xFFFF));
     }
     fclose(f);

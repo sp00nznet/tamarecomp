@@ -103,4 +103,20 @@ void tama_set_buttons(tama_t *t, uint8_t mask);
  * E0C6S46 has eight tones between 1170 and 4096 Hz and nothing else. */
 unsigned tama_buzzer_hz(const tama_t *t);
 
+/* Audio, and the machine's clock.
+ *
+ * tama_audio_step advances the machine to the cycle that sample `n` falls on
+ * and returns that sample. Driving time from the audio rate rather than the
+ * other way round keeps the two in lockstep for free, and it puts the one
+ * subtle bit in a single place: a sample is a fraction of a CPU cycle and
+ * tama_run cannot stop mid-instruction, so stepping by a fixed amount per
+ * sample silently runs several times too fast. Each sample is anchored to an
+ * absolute cycle instead. */
+typedef struct tama_audio {
+    double   phase;
+    uint64_t samples;
+} tama_audio_t;
+
+int16_t tama_audio_step(tama_t *t, tama_audio_t *a, unsigned rate);
+
 #endif

@@ -211,6 +211,28 @@ unsigned tama_buzzer_hz(const tama_t *t)
 }
 
 
+int16_t tama_audio_step(tama_t *t, tama_audio_t *a, unsigned rate)
+{
+    uint64_t want = ((a->samples + 1) * TAMA_OSC1_HZ) / rate;
+    unsigned hz;
+
+    while (t->cycles < want)
+        tama_step(t, want - t->cycles);   /* overshoot is fine; loop just ends */
+    a->samples++;
+
+    hz = tama_buzzer_hz(t);
+    if (!hz) {
+        a->phase = 0.0;
+        return 0;
+    }
+    /* The buzzer is a square wave and nothing else, so this is a phase
+     * accumulator and a sign. */
+    a->phase += (double)hz / rate;
+    a->phase -= (double)(uint64_t)a->phase;
+    return a->phase < 0.5 ? 9000 : -9000;
+}
+
+
 void tama_set_buttons(tama_t *t, uint8_t mask)
 {
     /* Active low: a held button pulls its K0 line down. A high-to-low edge on
